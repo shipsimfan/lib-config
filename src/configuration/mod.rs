@@ -10,6 +10,12 @@ pub struct Configuration {
 
 impl Configuration {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        if !path.as_ref().exists() {
+            return Ok(Configuration {
+                options: HashMap::new(),
+            });
+        }
+
         let file_contents = match std::fs::read_to_string(path) {
             Ok(string) => string,
             Err(error) => return Err(Error::ReadFileError(error)),
