@@ -8,6 +8,11 @@ pub struct Configuration {
     options: HashMap<String, String>,
 }
 
+enum ContainerState {
+    Object,
+    Array(usize),
+}
+
 impl Configuration {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file_contents = match std::fs::read_to_string(path) {
@@ -16,169 +21,198 @@ impl Configuration {
         };
 
         let mut current_container = String::new();
+        let mut current_state = ContainerState::Object;
         let mut container_scope = Vec::new();
         let mut options = HashMap::new();
         let mut iter: VecDeque<char> = file_contents.chars().collect();
         let mut line = 0;
         'main_loop: loop {
-            // Ignore whitespace
+            // Ignore whitespace & comments
             'whitespace_loop: loop {
                 match iter.pop_front() {
                     Some(c) => {
-                        if !c.is_whitespace() {
+                        if c == '#' {
+                            // Loop until end of line or end of file
+                            while let Some(c) = iter.pop_front() {
+                                if c == '\n' {
+                                    line += 1;
+                                    break;
+                                }
+                            }
+                            continue 'whitespace_loop;
+                        } else if !c.is_whitespace() {
                             iter.push_front(c);
                             break 'whitespace_loop;
                         } else if c == '\n' {
                             line += 1;
                         }
                     }
-                    None => break 'whitespace_loop,
+                    None => break 'main_loop,
                 }
             }
 
-            // Check first character
-            let c = match iter.pop_front() {
-                Some(c) => c,
-                None => break 'main_loop,
-            };
+            match current_state {
+                ContainerState::Array(array_state) => {
+                    match iter.pop_front() {
+                        Some(c) => match c {
+                            '{' => {
+                                // Object
 
-            match c {
-                '[' => {
-                    // Collect container name
+                                // Move down scope
+                                container_scope.push((
+                                    current_container.clone(),
+                                    ContainerState::Array(array_state + 1),
+                                ));
+
+                                current_container.push_str(&format!(
+                                    "{}{}",
+                                    if current_container == "" { "" } else { "." },
+                                    array_state
+                                ));
+
+                                current_state = ContainerState::Object;
+                            }
+                            '[' => {
+                                // Array
+
+                                // Move down scope
+                                container_scope.push((
+                                    current_container.clone(),
+                                    ContainerState::Array(array_state + 1),
+                                ));
+
+                                current_container.push_str(&format!(
+                                    "{}{}",
+                                    if current_container == "" { "" } else { "." },
+                                    array_state
+                                ));
+
+                                current_state = ContainerState::Array(0);
+                            }
+                            ']' => {
+                                // End of array
+
+                                // Move scope up
+                                let (old_container, old_state) = container_scope
+                                    .pop()
+                                    .unwrap_or((String::new(), ContainerState::Object));
+
+                                current_container = old_container;
+                                current_state = old_state;
+                            }
+                            _ => return Err(Error::UnexpectedCharacter(c, line)),
+                        },
+                        None => break 'main_loop,
+                    }
+                }
+                ContainerState::Object => {
+                    // Collect item name
                     let mut name = String::new();
-                    'name_loop: loop {
-                        let c = match iter.pop_front() {
-                            Some(c) => c,
-                            None => break 'name_loop,
-                        };
+                    let mut close = false;
 
-                        if c == '\n' {
-                            break 'name_loop;
-                        }
-
-                        if c.is_whitespace() {
-                            return Err(Error::InvalidContainer(line));
-                        }
-
-                        name.push(c);
-                    }
-
-                    if name == "" {
-                        return Err(Error::InvalidContainer(line));
-                    }
-
-                    container_scope.push(name);
-                    current_container = String::new();
-                    let mut first = true;
-                    for part in &container_scope {
-                        if !first {
-                            current_container.push('.');
-                        } else {
-                            first = false;
-                        }
-
-                        current_container.push_str(part);
-                    }
-                } // Start of container
-                ']' => match container_scope.pop() {
-                    Some(_) => {
-                        current_container = String::new();
-                        let mut first = true;
-                        for part in &container_scope {
-                            if !first {
-                                current_container.push('.');
-                            } else {
-                                first = false;
-                            }
-
-                            current_container.push_str(part);
-                        }
-                    }
-                    None => {} // Ignore mismatched brackets
-                }, // End of container
-                _ => {
-                    // Start of option
-                    let mut found_equals = false;
-                    let mut name = format!("{}", c);
-                    loop {
-                        match iter.pop_front() {
-                            Some(c) => {
-                                if c == ' ' || c == '=' {
-                                    if c == '=' {
-                                        found_equals = true;
-                                    }
-
-                                    break;
-                                } else if c == '\n' {
-                                    return Err(Error::InvalidOption(line));
-                                }
-
-                                name.push(c);
-                            }
-                            None => return Err(Error::InvalidOption(line)),
-                        }
-                    }
-                    name = name.trim().to_owned();
-
-                    if !found_equals {
-                        // Search for equals
-                        while let Some(c) = iter.pop_front() {
-                            if c == '\n' {
-                                return Err(Error::InvalidOption(line));
-                            }
-
-                            if c.is_whitespace() {
-                                continue;
-                            }
-
-                            if c == '=' {
+                    while let Some(c) = iter.pop_front() {
+                        match c {
+                            '#' => return Err(Error::UnexpectedComment(line)),
+                            '{' | '[' | ':' | '}' => {
+                                close = c == '}';
+                                name = name.trim().to_owned();
+                                iter.push_front(c);
                                 break;
                             }
+                            '\n' => return Err(Error::UnexpectedEndOfLine(line)),
+                            _ => name.push(c),
                         }
                     }
 
-                    // Ignore whitespace
-                    while let Some(c) = iter.pop_front() {
-                        if c == '\n' {
-                            return Err(Error::InvalidOption(line));
-                        }
-
-                        if !c.is_whitespace() {
-                            iter.push_front(c);
-                            break;
-                        }
+                    if !close && name == "" {
+                        return Err(Error::EmptyKey(line));
+                    } else if close && name != "" {
+                        return Err(Error::UnexpectedEndOfContainer(line));
                     }
 
-                    // Get value
-                    let mut value = String::new();
-                    'value_loop: loop {
-                        let c = match iter.pop_front() {
-                            Some(c) => c,
-                            None => break 'value_loop,
-                        };
+                    // Parse type
+                    match iter.pop_front() {
+                        Some(c) => match c {
+                            '{' => {
+                                // Object
 
-                        if c == '\n' {
-                            line += 1;
-                            break;
-                        }
+                                // Move scope down
+                                container_scope
+                                    .push((current_container.clone(), ContainerState::Object));
 
-                        value.push(c);
-                    }
-                    value = value.trim().to_owned();
+                                // Update current container
+                                if current_container != "" {
+                                    current_container.push('.');
+                                }
+                                current_container.push_str(&name);
+                            }
+                            '[' => {
+                                // Array
 
-                    if value == "" {
-                        return Err(Error::InvalidOption(line - 1));
-                    }
+                                // Move scope down
+                                container_scope
+                                    .push((current_container.clone(), ContainerState::Object));
 
-                    let name = if current_container == "" {
-                        name
-                    } else {
-                        format!("{}.{}", current_container, name)
-                    };
+                                // Update current container
+                                if current_container != "" {
+                                    current_container.push('.');
+                                }
+                                current_container.push_str(&name);
 
-                    match options.insert(name.clone(), value) {
-                        Some(_) => return Err(Error::RepeatedOption(name, line - 1)),
-                        None => {}
+                                // Update current state
+                                current_state = ContainerState::Array(0);
+                            }
+                            ':' => {
+                                // Value
+
+                                // Build key
+                                let key = if current_container == "" {
+                                    name
+                                } else {
+                                    format!("{}.{}", current_container, name)
+                                };
+
+                                // Verify it doesn't exist
+                                match options.get(&key) {
+                                    Some(_) => return Err(Error::RepeatedOption(key, line)),
+                                    None => {}
+                                }
+
+                                // Build value
+                                let mut value = String::new();
+                                while let Some(c) = iter.pop_front() {
+                                    match c {
+                                        '#' => {
+                                            iter.push_front(c);
+                                            break;
+                                        }
+                                        '\n' => {
+                                            line += 1;
+                                            break;
+                                        }
+                                        _ => value.push(c),
+                                    }
+                                }
+
+                                value = value.trim().to_owned();
+
+                                // Insert into options
+                                options.insert(key, value);
+                            }
+                            '}' => {
+                                // End of Object
+
+                                // Move scope up
+                                let (old_container, old_state) = container_scope
+                                    .pop()
+                                    .unwrap_or((String::new(), ContainerState::Object));
+
+                                current_container = old_container;
+                                current_state = old_state;
+                            }
+                            _ => panic!("Character is not one of '{{', '[', or ':'"),
+                        },
+                        None => return Err(Error::UnexpectedEndOfFile),
                     }
                 }
             }
